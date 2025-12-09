@@ -71,6 +71,8 @@ class MarkerDetectionSystem:
         - 質心點
         - 3D 軸（如果有 rvec/tvec）
         - 距離資訊（3D 距離 + 深度距離）
+        - 4 個角點座標（順時針）
+        - 由 TL, TR, BL 算出的 X/Y/Z 單位向量
         """
         if not self.detected_markers:
             return frame
@@ -78,12 +80,72 @@ class MarkerDetectionSystem:
         for marker_id, info in self.detected_markers.items():
             cX, cY = info["Centroid"]
 
-            # 畫 marker 質心
+            # ① 畫 marker 質心
             cv2.circle(frame, (cX, cY), 5, (255, 0, 255), -1)
 
+            # ② 顯示 4 個 corners（OpenCV ArUco 會回傳：TL, TR, BR, BL，順時針）
+            corners = info["Corners"]          # shape: (4, 2)
+            corner_names = ["TL", "TR", "BR", "BL"]  # Top-Left, Top-Right, ...
+
+            for idx, (px, py) in enumerate(corners):
+                px_i, py_i = int(px), int(py)
+
+                # 小點標出 corner 位置
+                cv2.circle(frame, (px_i, py_i), 4, (0, 0, 255), -1)
+
+                # 在 corner 附近顯示座標文字
+                text = f"{corner_names[idx]} ({px_i}, {py_i})"
+                cv2.putText(
+                    frame,
+                    text,
+                    (px_i + 5, py_i - 5 - idx * 15),  # 稍微錯開避免重疊
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (0, 255, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+            # ③ 用 TL, TR, BL 算 X/Y/Z 單位向量
+            #    TL, TR, BR, BL 對應 corners[0], corners[1], corners[2], corners[3]
+            TL = corners[0].astype(np.float32)
+            TR = corners[1].astype(np.float32)
+            BL = corners[3].astype(np.float32)
+
+            vec_x = TR - TL          # TR - TL
+            vec_y = BL - TL          # BL - TL
+
+            # 避免除以 0
+            eps = 1e-8
+            norm_x = np.linalg.norm(vec_x) + eps
+            norm_y = np.linalg.norm(vec_y) + eps
+
+            x_dir2 = vec_x / norm_x   # 2D 單位向量
+            y_dir2 = vec_y / norm_y   # 2D 單位向量
+
+            # 升成 3D 向量（z=0），用外積算 Z
+            x_dir3 = np.array([x_dir2[0], x_dir2[1], 0.0], dtype=np.float32)
+            y_dir3 = np.array([y_dir2[0], y_dir2[1], 0.0], dtype=np.float32)
+
+            z_dir3 = np.cross(x_dir3, y_dir3)  # X × Y
+            norm_z = np.linalg.norm(z_dir3) + eps
+            z_dir3 /= norm_z                   # 變成單位向量
+
+            # 文字列
             text_lines = []
 
-            # 1) 使用 tvec 的 3D 距離（公尺 → 公分）
+            # 先把這組 X/Y/Z 單位向量印出來（以 cm 為單位沒意義，這裡就是純方向）
+            text_lines.append(
+                f"X_dir: ({x_dir3[0]: .2f}, {x_dir3[1]: .2f}, {x_dir3[2]: .2f})"
+            )
+            text_lines.append(
+                f"Y_dir: ({y_dir3[0]: .2f}, {y_dir3[1]: .2f}, {y_dir3[2]: .2f})"
+            )
+            text_lines.append(
+                f"Z_dir: ({z_dir3[0]: .2f}, {z_dir3[1]: .2f}, {z_dir3[2]: .2f})"
+            )
+
+            # ④ 使用 tvec 的 3D 距離（公尺 → 公分）
             if "tvec" in info:
                 tvec = info["tvec"].reshape(-1)  # (3,)
                 dist_cam_m = np.linalg.norm(tvec)
@@ -102,10 +164,8 @@ class MarkerDetectionSystem:
                     0.05
                 )
 
-
-            # 2) 使用 RealSense 深度影像在質心位置讀取距離（公尺）
+            # ⑤ 使用 RealSense 深度影像在質心位置讀取距離（公尺）
             if depth_frame is not None:
-                # 注意要 clamp 在畫面範圍內
                 h, w = frame.shape[:2]
                 u = np.clip(cX, 0, w - 1)
                 v = np.clip(cY, 0, h - 1)
@@ -113,12 +173,12 @@ class MarkerDetectionSystem:
                 if depth_m > 0:
                     text_lines.append(f"Depth @ center: {depth_m*100:5.1f} cm")
 
-            # 把文字顯示在 marker 質心附近
+            # ⑥ 把文字顯示在 marker 質心附近
             for i, line in enumerate(text_lines):
                 cv2.putText(
                     frame,
                     line,
-                    (cX - 150, cY + 20 + i * 20),
+                    (cX - 220, cY + 20 + i * 20),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (0, 255, 255),
@@ -127,6 +187,8 @@ class MarkerDetectionSystem:
                 )
 
         return frame
+
+
 
     def draw_connections_3d(self, frame):
         """
